@@ -2,14 +2,31 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
+	"math"
+	path "path/filepath"
 	"runtime/pprof"
 	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/intern"
+	"github.com/BurntSushi/ty/fun"
+
+	"github.com/TuftsBCB/fragbag/bow"
+	"github.com/TuftsBCB/fragbag/bowdb"
 	"github.com/TuftsBCB/tools/util"
 )
+
+var flagThreshold = float64(0)
+
+var bowdbSearch = bowdb.SearchOptions{
+	Limit:  -1,
+	Min:    0,
+	Max:    math.MaxFloat64,
+	SortBy: bowdb.SortByCosine,
+	Order:  bowdb.OrderAsc,
+}
 
 type inDomains struct {
 	in    *intern.Interner
@@ -22,19 +39,29 @@ type aligner struct {
 	outpath string
 }
 
-var domains *inDomains
+type flib struct {
+	db      *bowdb.DB
+	bowed   []bow.Bowed // indexed by atom
+	outpath string
+}
 
 func init() {
+	flag.Float64Var(&flagThreshold, "threshold", flagThreshold,
+		"Set the distance threshold to use when computing AUC.")
 	util.FlagUse("cpu", "cpuprof")
 	util.FlagParse(
 		"cath-domain-labels best-of-all-matrix"+
-			"matrix-file out-file [ matrix-file out-file ... ]",
-		"Computes the AUC of each aligner matrix given with respect to the\n"+
-			"'best-of-all' matrix given. Each AUC is written to a separate\n"+
-			"out-file. The sizes of all matrices must be exactly equivalent.")
+			"(bowdb | matrix-file) out-file "+
+			"[ (bowdb | matrix-file) out-file ... ]",
+		"Computes the AUC of each aligner matrix (or BOW database) given\n"+
+			"with respect to the 'best-of-all' matrix given. Each AUC is\n"+
+			"written to a separate out-file. The sizes of all matrices must\n"+
+			"be exactly equivalent.\n"+
+			"Files are interpreted as BOW databases if they have a '.bowdb'\n"+
+			"file extension.")
 	util.AssertLeastNArg(4)
 	if util.NArg()%2 != 0 {
-		util.Fatalf("There must be an 'out-file' for each 'matrix-file.'")
+		util.Fatalf("There must be an out file for each matrix or bowdb file.")
 	}
 }
 
@@ -46,31 +73,74 @@ func main() {
 		defer pprof.StopCPUProfile()
 	}
 
-	domains = readDomains(util.Arg(0))
-	boa := readMatrix(util.Arg(1))
+	// Read all CATH domains, the best-of-all matrix, and the matrix for
+	// each aligner.
+	domains := readDomains(util.Arg(0))
+	boa := readMatrix(domains, util.Arg(1))
 	aligners := make([]aligner, 0)
+	flibs := make([]flib, 0)
 	for i := 2; i < util.NArg(); i += 2 {
-		aligners = append(aligners, aligner{
-			readMatrix(util.Arg(i)),
-			util.Arg(i + 1),
-		})
+		fpath := util.Arg(i)
+		if path.Ext(fpath) == ".bowdb" {
+			db := util.OpenBowDB(fpath)
+			records, err := db.ReadAll()
+			util.Assert(err)
+
+			bowed := make([]bow.Bowed, domains.in.Len())
+			for _, b := range records {
+				if !domains.in.Exists(b.Id) {
+					util.Fatalf("Found ID in bowdb that isn't in the list "+
+						"of CATH domains provided: %s", b.Id)
+				}
+				bowed[domains.in.Atom(b.Id)] = b
+			}
+			flibs = append(flibs, flib{db, bowed, util.Arg(i + 1)})
+		} else {
+			aligners = append(aligners, aligner{
+				readMatrix(domains, fpath),
+				util.Arg(i + 1),
+			})
+		}
 	}
-	fmt.Println(dist(boa, "12asB0", "153l00"))
-	fmt.Println(dist(boa, "153l00", "16pk01"))
-	fmt.Println(dist(boa, "9gafC2", "9wgaB4"))
-	fmt.Println(dist(aligners[0].matrix, "12asB0", "153l00"))
-	fmt.Println(dist(aligners[0].matrix, "153l00", "16pk01"))
-	fmt.Println(dist(aligners[0].matrix, "9gafC2", "9wgaB4"))
-	fmt.Printf("Total CATH domains: %d\n", len(domains.ids))
+	// Now remove CATH domains that don't have a corresponding structure file.
+	// We don't do this initially since the matrix files are indexed with
+	// respect to all CATH domains (includings ones without structure).
+	// This is an artifact of the fact that the matrices were generated with
+	// a very old version of CATH.
 	domains.removeOldDomains()
-	fmt.Printf("Total valid CATH domains: %d\n", len(domains.ids))
+
+	if a := matrixAuc(domains, boa, boa, flagThreshold); a != 1.0 {
+		util.Fatalf("Something is wrong. The AUC of the best-of-all matrix "+
+			"with respect to itself is %f, but it should be 1.0.", a)
+	}
+
+	if len(aligners) > 0 {
+		fmt.Println("Computing AUC for aligners...")
+		writeAuc := func(aligner aligner) struct{} {
+			w := util.CreateFile(aligner.outpath)
+			a := matrixAuc(domains, boa, aligner.matrix, flagThreshold)
+			fmt.Fprintf(w, "%f\n", a)
+			return struct{}{}
+		}
+		fun.ParMap(writeAuc, aligners)
+	}
+	if len(flibs) > 0 {
+		fmt.Println("Computing AUC for bowdbs...")
+		writeAuc := func(flib flib) struct{} {
+			w := util.CreateFile(flib.outpath)
+			a := flibAuc(domains, boa, flib, flagThreshold)
+			fmt.Fprintf(w, "%f\n", a)
+			return struct{}{}
+		}
+		fun.ParMap(writeAuc, flibs)
+	}
 }
 
 func dist(matrix *intern.Table, d1, d2 string) float64 {
 	return matrix.Get(matrix.Atom(d1), matrix.Atom(d2))
 }
 
-func readMatrix(fpath string) *intern.Table {
+func readMatrix(domains *inDomains, fpath string) *intern.Table {
 	var (
 		err  error
 		fval float64
@@ -90,7 +160,7 @@ func readMatrix(fpath string) *intern.Table {
 			// This actually skips the very last element in the table, but
 			// it's OK because the value at [k, k] is always 0.
 			switch {
-			case b == ' ' || b == '\n' || bend + 1 == len(line):
+			case b == ' ' || b == '\n' || bend+1 == len(line):
 				sval = line[bstart:bend]
 				bstart = bend + 1
 				j++
@@ -121,6 +191,7 @@ func readDomains(fpath string) *inDomains {
 	scanner := bufio.NewScanner(util.OpenFile(fpath))
 	for scanner.Scan() {
 		d := strings.Fields(scanner.Text())[0]
+		d = stripExt(path.Base(util.CathPath(d)))
 		a := domains.in.Atom(d)
 		domains.ids = append(domains.ids, d)
 		domains.atoms = append(domains.atoms, a)
@@ -140,4 +211,12 @@ func (d *inDomains) removeOldDomains() {
 		}
 	}
 	d.ids, d.atoms = ids, atoms
+}
+
+func stripExt(s string) string {
+	i := strings.Index(s, ".")
+	if i == -1 {
+		return s
+	}
+	return s[0:i]
 }
