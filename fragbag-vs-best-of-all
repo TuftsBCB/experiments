@@ -179,7 +179,7 @@ bcb.cached_cmd([bowdb], 'flib', 'mk-bowdb',
 # Generate a best-of-all matrix in exactly the same format as the matrices
 # given. This is shelled out to Go because Python is pitifully slow.
 fbest = bcb.ejoin('matrix.all')
-bcb.cached_cmd([fbest], 'make-best-of-all', fbest, *boa['aligners'].values())
+bcb.cached_cmd([fbest], 'boa-make', fbest, *boa['aligners'].values())
 best = read_sas_scores(boa['index'], fbest)
 
 mattest = read_sas_scores(boa['index'], boa['aligners']['ce'])
