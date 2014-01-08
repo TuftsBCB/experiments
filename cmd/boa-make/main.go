@@ -12,7 +12,7 @@ import (
 
 func init() {
 	util.FlagParse(
-		"make-best-of-all out-file matrix-file [ matrix-file ... ]",
+		"out-file matrix-file [ matrix-file ... ]",
 		"Combines the input matrices into a 'best-of-all' matrix by\n"+
 			"using the best (lowest) SAS score for each pair. All given\n"+
 			"matrices must be exactly the same size.")
