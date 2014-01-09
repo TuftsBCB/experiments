@@ -115,8 +115,8 @@ for threshold in flags.config.thresholds:
         for entity, auc in aucs:
             print >> w, '%s\t%f' % (entity, auc)
         w.close()
-    collect(bcb.rjoin('%s-aligners.auc' % threshold),
+    collect(bcb.rjoin('%s-aligners.auc.tsv' % threshold),
             bcb.eglob('auc/%s/aligners/*' % threshold)) 
-    collect(bcb.rjoin('%s-bowdbs.auc' % threshold),
+    collect(bcb.rjoin('%s-bowdbs.auc.tsv' % threshold),
             bcb.eglob('auc/%s/bowdbs/*' % threshold)) 
 
