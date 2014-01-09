@@ -1,20 +1,13 @@
 #!/usr/bin/env python2
 
-from collections import defaultdict
 import os
 import os.path
 
 import pybcb as bcb
 import pybcb.flags as flags
 
-flags.use_all('frag-lib', 'cpu', 'tmp-dir', 'results-dir',
+flags.use_all('cpu', 'tmp-dir', 'results-dir',
               'ignore-cache', 'no-cache')
-flags.use('cath_pdb', (
-    lambda: flags.add('--cath-pdb', type=str,
-                      default=os.getenv('CATH_PDB_PATH', '/data/bio/cath/pdb'),
-                      help='A directory containing CATH domains as PDB files.'),
-    flags.verify_path,
-))
 flags.use('boa', (
     lambda: flags.add('--boa', type=str,
                       default='/data/bio/best-of-all',
@@ -28,88 +21,25 @@ flags.use('thresholds', (
                       help='The thresholds at which to compute average AUC.'),
     None,
 ))
+flags.use('frag_libs', (
+    lambda: flags.add('frag_libs', type=str, nargs='+',
+                      help='The fragment libraries to compute an AUC for.'),
+    None,
+))
 flags.init()
-
-def mean(ns):
-    return float(sum(ns)) / float(len(ns))
-
-def auc(points):
-    """
-    Given a list of tuples as (fpr, tpr) points, compute the AUC by
-    relation to the Gini coefficient.
-    """
-    areas = [0] * (len(points) - 1)
-    for i in xrange(1, len(points)):
-        x0, y0 = points[i-1]
-        x1, y1 = points[i]
-        areas[i-1] = (x1 - x0) * (y1 + y0)
-    return 1 - (float(sum(areas)) / 2.0)
-
-def roc_curve(ranked, tps, tns):
-    points = [0] * (len(ranked)+1)
-    for i in xrange(len(ranked)+1):
-        pos = ranked[0:i]
-        points[i] = (rate(tns, pos), rate(tps, pos))
-    return points
-
-def rate(gold, query_rank):
-    if len(gold) == 0:
-        return 0.0
-    return float(len(gold.intersection(query_rank))) / float(len(gold))
-
-def query_matrix(matrix, domains, did, threshold=None):
-    """
-    Returns a ranking of hits for a particular query against all
-    domains in a particular matrix.
-    """
-    ranked = []
-    for did2 in domains:
-        if did == did2:
-            continue
-        ranked.append((did2, matrix[(did, did2)]))
-    return [d for d, _ in sorted(ranked, key=lambda (_, s): s)]
-
-def tps_and_tns(matrix, domains, did, threshold):
-    """
-    Returns a tuple containing the hits better or equal to the
-    threshold and hits worse than the threshold (as sets).
-    """
-    tps, tns = set(), set()
-    for did2 in domains:
-        if did == did2:
-            continue
-        sas = matrix[(did, did2)]
-        if sas > threshold:
-            tns.add(did2)
-        else:
-            tps.add(did2)
-    return tps, tns
-
-def cath_path(did):
-    return os.path.join(flags.config.cath_pdb, did)
 
 def open_boa(fpath):
     """
     Given a directory containing Rachel Kolodny's "best-of-all" results
     from six different structural aligners, return a dictionary with
-    three keys: `aligners`, `domains` and `index`. `aligners` maps
-    structural aligner names to the file paths of pairwise SAS scores.
-    The `domains` key is a dictionary keyed by domain id with a value
-    corresponding to the index of the domain in the best-of-all
-    matrices. Note that this dictionary omits domains with missing PDB
-    representations in flags.config.cath_pdb.  The reverse of `domains`
-    is also included and keyed as `index`.
+    three keys: `dompath`, `aligners` and `domains`. `aligners` is a
+    dictionary of align names to file paths of aligner matrix files
+    (SAS scores) and `domains` is a list of CATH domains, in order,
+    corresponding to the entries in each aligner matrix file. Finally,
+    `dompath` is the file path to the file containing CATH domains.
     """
-    def cath_old_exists(did):
-        if did[4] == '0':
-            didp = cath_path('%sA%s' % (did[0:4], did[4:6]))
-            if os.access(didp, os.R_OK):
-                return True
-        did = '%s0%s' % (did[0:5], did[5])
-        return os.access(cath_path(did), os.R_OK)
-
     aligners = ['ce', 'dali', 'dejavu', 'getter', 'ssap', 'ssm']
-    info = {'aligners': {}, 'domains': {}, 'index': {}}
+    info = {'aligners': {}, 'domains': [], 'dompath': ''}
     for aligner in aligners:
         info['aligners'][aligner] = os.path.join(fpath, 'matrix.%s' % aligner)
         if not os.access(info['aligners'][aligner], os.R_OK):
@@ -117,48 +47,15 @@ def open_boa(fpath):
                          'in "%s".' % (aligner, info[aligner]))
             bcb.exit(1)
 
-    dompath = os.path.join(fpath, 'cath_domain_labels')
+    info['dompath'] = os.path.join(fpath, 'cath_domain_labels')
     try:
-        with open(dompath) as fdomains:
-            domains = [line.split()[0].strip() for line in fdomains]
-            for i, did in enumerate(domains):
-                if cath_old_exists(did):
-                    info['domains'][did] = i
-                    info['index'][i] = did
-
+        with open(info['dompath']) as fdomains:
+            info['domains'] = [line.split()[0].strip() for line in fdomains]
     except IOError:
-        bcb.eprintln('Could not open CATH domain list at "%s".' % dompath)
+        bcb.eprintln('Could not open CATH domain list at "%s".'
+                     % info['dompath'])
         bcb.exit(1)
     return info
-
-def read_sas_scores(index, matrix_path):
-    """
-    Given an index mapping positions to domains (as computed by
-    `open_boa`) and a path to a matrix file, return a dictionary
-    representing the matrix of SAS scores. The dictionary returned is
-    symmetric.
-    """
-    bcb.veprintln('Reading %s...' % os.path.basename(matrix_path))
-    matrix = defaultdict(float)
-    with open(matrix_path) as fmatrix:
-        for r, row in enumerate(fmatrix):
-            if r not in index:
-                continue
-            for c, sas in enumerate(map(float, row.split())):
-                if c not in index:
-                    continue
-                d1, d2 = index[r], index[c]
-                if sas == 0 and (d1, d2) in matrix:
-                    continue
-                matrix[(d1, d2)], matrix[(d2, d1)] = sas, sas
-    return matrix
-
-def sas(matrix, d1, d2):
-    """
-    Returns the SAS score corresponding to the pair of domains given
-    in the matrix.
-    """
-    return matrix[(d1, d2)]
 
 bcb.set_exp_dir(flags.config.tmp_dir)
 bcb.set_results_dir(flags.config.results_dir)
@@ -166,30 +63,60 @@ bcb.make()
 
 bcb.makedirs(bcb.ejoin('bowdbs'))
 
-flib_path = flags.config.frag_lib
-flib_name = bcb.flib_name(flib_path)
+flib_paths = flags.config.frag_libs
+flib_names = map(bcb.flib_name, flib_paths)
 boa = open_boa(flags.config.boa)
-
-# Make the BOW database for the given fragment library containing all of the
-# CATH entries from the best-of-all alignment test.
-bowdb = bcb.ejoin('bowdbs', '%s.bowdb' % flib_name)
-bcb.cached_cmd([bowdb], 'flib', 'mk-bowdb',
-                        '-overwrite', bowdb, flib_path, *boa['domains'])
 
 # Generate a best-of-all matrix in exactly the same format as the matrices
 # given. This is shelled out to Go because Python is pitifully slow.
 fbest = bcb.ejoin('matrix.all')
 bcb.cached_cmd([fbest], 'boa-make', fbest, *boa['aligners'].values())
-best = read_sas_scores(boa['index'], fbest)
 
-mattest = read_sas_scores(boa['index'], boa['aligners']['ce'])
+# Make the BOW database for the given fragment libraries containing all of the
+# CATH entries from the best-of-all alignment test.
+for fpath, fname in zip(flib_paths, flib_names):
+    bowdb = bcb.ejoin('bowdbs', '%s.bowdb' % fname)
+    bcb.cached_cmd([bowdb], 'flib', 'mk-bowdb',
+                            '-overwrite', bowdb, fpath, *boa['domains'])
 
-aucs = []
-domains = boa['domains'].keys()
-for query in domains:
-    tps, tns = tps_and_tns(best, domains, query, 2.0)
-    test = query_matrix(mattest, domains, query)
-    roc = roc_curve(test, tps, tns)
-    aucs.append(auc(roc))
-print mean(aucs)
+for threshold in flags.config.thresholds:
+    def auc_path(which, name):
+        return bcb.ejoin('auc', str(threshold), which, name)
+    bcb.makedirs(bcb.ejoin('auc', str(threshold), 'aligners'))
+    bcb.makedirs(bcb.ejoin('auc', str(threshold), 'bowdbs'))
+
+    # Compute the AUCs for each aligner at this threshold.
+    aucFiles = []
+    for a in boa['aligners']:
+        aucFiles.append(boa['aligners'][a])
+        aucFiles.append(auc_path('aligners', a))
+    bcb.cached_cmd(aucFiles, 'boa-auc', '-threshold', str(threshold),
+                             boa['dompath'], fbest, *aucFiles)
+
+    # Now compute AUCs for each fragment library at this threshold.
+    aucFiles = []
+    for fname in flib_names:
+        aucFiles.append(bcb.ejoin('bowdbs', '%s.bowdb' % fname))
+        aucFiles.append(auc_path('bowdbs', fname))
+    bcb.cached_cmd(aucFiles, 'boa-auc', '-threshold', str(threshold),
+                             boa['dompath'], fbest, *aucFiles)
+
+    # Now merge many of the AUCs into a smaller number of files.
+    # Each file distinguishes threshold, and whether it was an aligner or a BOW 
+    # DB.
+    def collect(to, aucFiles):
+        aucs = []
+        for aucFile in aucFiles:
+            entity = os.path.basename(aucFile)
+            aucs.append((entity, float(open(aucFile).read().strip())))
+        aucs = sorted(aucs, key=lambda (_, auc): auc, reverse=True)
+
+        w = open(to, 'w+')
+        for entity, auc in aucs:
+            print >> w, '%s\t%f' % (entity, auc)
+        w.close()
+    collect(bcb.rjoin('%s-aligners.auc' % threshold),
+            bcb.eglob('auc/%s/aligners/*' % threshold)) 
+    collect(bcb.rjoin('%s-bowdbs.auc' % threshold),
+            bcb.eglob('auc/%s/bowdbs/*' % threshold)) 
 
