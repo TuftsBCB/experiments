@@ -1,0 +1,143 @@
+#!/usr/bin/env python2.7
+
+from collections import defaultdict
+from cStringIO import StringIO
+import csv
+import multiprocessing.pool
+
+import numpy as np
+
+import pybcb as bcb
+import pybcb.flags as flags
+
+flags.use_all('pdb-dir',
+              'cpu', 'tmp-dir', 'results-dir',
+              'ignore-cache', 'no-cache')
+flags.use('nmr_chains', (
+    lambda: flags.add('--nmr-chains', type=str,
+                      default='./experiments/input/fragbag-pairdists/nmr-chains',
+                      help='A file containing the NMR chains to test, each '
+                           'on a new line.'),
+    flags.verify_path,
+))
+flags.use('cath_doms_24', (
+    lambda: flags.add('--cath-doms-24', type=str,
+                      default='/data/bio/cath/CathDomainList.v2.4',
+                      help='A Cath List File from v2.4.'),
+    flags.verify_path,
+))
+flags.use('cath_doms', (
+    lambda: flags.add('--cath-doms', type=str,
+                      default='/data/bio/best-of-all/cath_domain_labels',
+                      help='A list of CATH domains to use each on new line.'),
+    flags.verify_path,
+))
+flags.use('frag_libs', (
+    lambda: flags.add('frag_libs', type=str, nargs='+',
+                      help='The fragment libraries to compute pairwise '
+                           'distances for.'),
+    None,
+))
+flags.init()
+
+bcb.set_exp_dir(flags.config.tmp_dir)
+bcb.set_results_dir(flags.config.results_dir)
+bcb.make()
+
+flib_paths = flags.config.frag_libs
+flib_names = map(bcb.flib_name, flib_paths)
+
+def pair_dists(flib_path, bowers, models=False, include_domains=False):
+    cmd = ['flib', 'pairdist', '-quiet']
+    if models:
+        cmd.append('-models')
+    cmd += [flib_path] + bowers
+    out = StringIO(bcb.cmd(*cmd))
+    dists = []
+    for row in csv.reader(out, delimiter='\t'):
+        if include_domains:
+            dists.append((row[0], row[1], float(row[2])))
+        else:
+            dists.append(float(row[2]))
+    return dists
+
+def read_cath_domains(fpath):
+    return [line.split()[0].strip() for line in open(fpath)]
+
+def read_cath(fpath, domains):
+    domains = set(domains)
+    d = {'c': defaultdict(list),   'ca': defaultdict(list),
+         'cat': defaultdict(list), 'cath': defaultdict(list),
+         'domains': [], 'domains_c': {},
+        }
+    for line in open(fpath):
+        if line.startswith('#'):
+            continue
+        fields = line.split()
+        domain = fields[0]
+        if domain not in domains:
+            continue
+
+        c, a, t, h = map(int, fields[1:5])
+        d['c'][c].append(domain)
+        d['ca'][(c, a)].append(domain)
+        d['cat'][(c, a, t)].append(domain)
+        d['cath'][(c, a, t, h)].append(domain)
+        d['domains'].append(domain)
+        d['domains_c'][domain] = c
+    return d
+
+def write_distrib(out, dists):
+    with open(out, 'w+') as w:
+        mean, std = np.mean(dists), np.std(dists)
+        print >> w, '%f +/- %f' % (mean, std)
+
+# Outline of experiment:
+#
+# 1. Gather the Pride data set by extracting every model inside the given
+#    PDB entries into its own PDB file in a temporary directory.
+#
+# 2. For every group of models, create a BOW database.
+#
+# 3. Compute pairwise distances for all models in each PDB entry group.
+#
+# 4. Compute mean/std of all pairs for euclidean and cosine distance metrics.
+
+bcb.makedirs(bcb.rjoin('pride'))
+for c in ['cath', 'cat', 'ca', 'c', 'diffc']:
+    bcb.makedirs(bcb.rjoin(c))
+
+domains = read_cath_domains(flags.config.cath_doms)
+cath = read_cath(flags.config.cath_doms_24, domains)
+pool = multiprocessing.pool.ThreadPool(flags.config.cpu)
+chains = map(str.strip, open(flags.config.nmr_chains))
+for fpath, fname in zip(flib_paths, flib_names):
+    def distrib(out, groups, models=False):
+        def _():
+            alldists = []
+            def dists(group):
+                return pair_dists(fpath, group, models=models)
+            for ds in pool.imap(dists, groups):
+                alldists += ds
+            write_distrib(out, alldists)
+        bcb.cached([out], _)
+
+    def out(prefix):
+        return bcb.rjoin(prefix, 'cosine-%s' % fname)
+
+    distrib(out('pride'), [[c] for c in chains], models=True)
+    distrib(out('c'), cath['c'].values())
+    distrib(out('ca'), cath['ca'].values())
+    distrib(out('cat'), cath['cat'].values())
+    distrib(out('cath'), cath['cath'].values())
+
+    diffc_out = out('diffc')
+    def diffc():
+        alldists = []
+        dists = pair_dists(fpath, cath['domains'], include_domains=True)
+        for d1, d2, dist in dists:
+            if cath['domains_c'][d1] != cath['domains_c'][d2]:
+                alldists.append(dist)
+        write_distrib(diffc_out, alldists)
+    bcb.cached([diffc_out], diffc)
+

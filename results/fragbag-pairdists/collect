@@ -1,0 +1,39 @@
+#!/bin/sh
+
+function usage {
+  echo "Usage: $(basename $0) (cosine | euclid | histogram)" >&2
+  exit 1
+}
+
+if [ $# != 1 ]; then
+  usage
+fi
+
+kind=$1
+case $kind in
+  cosine|euclid|histogram)
+    ;;
+  *)
+    usage
+    ;;
+esac
+
+function distrib {
+  [[ -f "$1/$2" ]] && cat "$1/$2" || echo "N/A"
+}
+
+echo -e "flib\tpride\tcath\tcat\tca\tc\tdiffc"
+for f in pride/$kind-*; do
+  bf=$(basename "$f")
+  name="${bf#cosine-}"
+
+  pride="$(distrib pride "$bf")"
+  cath="$(distrib cath "$bf")"
+  cat="$(distrib cat "$bf")"
+  ca="$(distrib ca "$bf")"
+  c="$(distrib c "$bf")"
+  diffc="$(distrib diffc "$bf")"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    "$name" "$pride" "$cath" "$cat" "$ca" "$c" "$diffc"
+done
+
