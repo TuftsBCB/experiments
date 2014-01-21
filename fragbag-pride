@@ -1,18 +1,13 @@
 #!/usr/bin/env python2.7
 
-from collections import OrderedDict
 import csv
-from functools import partial as curry
-import glob
 import gzip
 import os
-import sys
 
 import numpy as np
 
 import pybcb as bcb
 import pybcb.flags as flags
-import pybcb.sabmark as sabmark
 
 flags.use_all('pdb-dir', 'frag-lib',
               'cpu', 'tmp-dir', 'results-dir',
