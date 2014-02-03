@@ -13,8 +13,7 @@ import numpy as np
 import pybcb as bcb
 import pybcb.flags as flags
 
-flags.use_all('pdb-dir',
-              'cpu', 'tmp-dir', 'results-dir',
+flags.use_all('cpu', 'tmp-dir', 'results-dir',
               'ignore-cache', 'no-cache')
 flags.use('cath_doms_s35', (
     lambda: flags.add('--cath-doms-s35', type=str,
