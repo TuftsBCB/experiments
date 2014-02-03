@@ -29,6 +29,7 @@ flags.use('frag_libs', (
     None,
 ))
 flags.init()
+pool = mp.Pool(processes=flags.config.cpu)
 
 cath_lib_name = path.basename(flags.config.cath_doms_s35)
 caths = [
@@ -142,7 +143,7 @@ def std_perms(bstd, count):
 
 def pmap(*args, **kargs):
     if flags.config.cpu > 1:
-        return mp.Pool(processes=flags.config.cpu).map(*args, **kargs)
+        return pool.map(*args, **kargs)
     else:
         return map(*args, **kargs)
 
