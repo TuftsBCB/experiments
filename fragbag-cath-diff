@@ -5,6 +5,7 @@ from cStringIO import StringIO
 import csv
 import itertools
 import multiprocessing as mp
+import os
 import os.path as path
 import random
 
@@ -170,6 +171,8 @@ for flib_path, flib_name in zip(flib_paths, flib_names):
     for group, subgroups in caths:
         for subgroup, keys in subgroups:
             outf = path.join(flib_dir, '%s-%s.tsv' % (group, subgroup))
+            if os.access(outf, os.R_OK):
+                continue
             out = open(outf, 'w+')
             bstd = stdb(keys, cats, bows)
             bmean = stdb_mean(bstd)
