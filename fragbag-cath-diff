@@ -1,0 +1,195 @@
+#!/usr/bin/env python2.7
+
+from collections import defaultdict
+from cStringIO import StringIO
+import csv
+import itertools
+import multiprocessing as mp
+import os.path as path
+import random
+
+import numpy as np
+
+import pybcb as bcb
+import pybcb.flags as flags
+
+flags.use_all('pdb-dir',
+              'cpu', 'tmp-dir', 'results-dir',
+              'ignore-cache', 'no-cache')
+flags.use('cath_doms_s35', (
+    lambda: flags.add('--cath-doms-s35', type=str,
+                      default='/data/bio/cath/CathDomainList.S35.v3.5.0',
+                      help='A S35 Cath List File'),
+    flags.verify_path,
+))
+flags.use('frag_libs', (
+    lambda: flags.add('frag_libs', type=str, nargs='+',
+                      help='The fragment libraries to compute pairwise '
+                           'distances for.'),
+    None,
+))
+flags.init()
+
+cath_lib_name = path.basename(flags.config.cath_doms_s35)
+caths = [
+    ('cat', [
+     ('mainly-alpha',
+      [(1, 10, 8), (1, 10, 10), (1, 10, 150), (1, 10, 238), (1, 10, 287),
+       (1, 10, 490), (1, 10, 760), (1, 20, 5), (1, 20, 58), (1, 20, 120),
+       (1, 25, 40), (1, 50, 10),
+      ]),
+     ('mainly-beta',
+      [(2, 10, 25), (2, 30, 29), (2, 30, 30), (2, 30, 42), (2, 30, 110),
+       (2, 40, 10), (2, 40, 30), (2, 40, 50), (2, 40, 70), (2, 40, 128),
+       (2, 60, 40), (2, 60, 120), (2, 80, 10),
+      ]),
+     ('alpha-beta',
+      [(3, 10, 20), (3, 10, 100), (3, 10, 129), (3, 10, 450), (3, 20, 20),
+       (3, 30, 70), (3, 30, 160), (3, 30, 200), (3, 30, 300), (3, 30, 390),
+       (3, 30, 420), (3, 30, 450), (3, 30, 1330), (3, 30, 1490), (3, 40, 30),
+       (3, 40, 50), (3, 40, 190), (3, 40, 630), (3, 40, 640), (3, 50, 50),
+       (3, 60, 20), (3, 90, 1150),
+      ]),
+     ]),
+    ('ca', [
+     ('mainly-alpha', [(1, 10), (1, 20), (1, 25), (1, 50)]),
+     ('mainly-beta', [(2, 10), (2, 20), (2, 30), (2, 40), (2, 60), (2, 70),
+                      (2, 80), (2, 160), (2, 170)]),
+     ('alpha-beta', [(3, 10), (3, 20), (3, 30), (3, 40), (3, 50), (3, 60),
+                     (3, 90)]),
+     ]),
+]
+
+def domains_from_cath(fpath):
+    domains, cats = [], defaultdict(list)
+    with open(fpath) as r:
+        for line in r:
+            domain, c, a, t = line.split()[0:4]
+            c, a, t = int(c), int(a), int(t)
+            cats[(c, a)].append(domain)
+            cats[(c, a, t)].append(domain)
+            domains.append(domain)
+    return domains, cats
+
+def vectors(flib_path, bowers):
+    flib_name = bcb.flib_name(flib_path)
+    outname = '%s-%s.tsv' % (cath_lib_name, flib_name)
+    outpath = bcb.ejoin('vectors', outname)
+    def _():
+        cmd = ['flib', 'vectors', flib_path] + bowers
+        out = StringIO(bcb.cmd(*cmd))
+        print >> open(outpath, 'w+'), out.read(),
+    bcb.cached([outpath], _)
+
+    bows = {}
+    for row in csv.reader(open(outpath), delimiter='\t'):
+        bows[row[0]] = map(float, row[1:])
+    return bows
+
+def stdb(cath_groups, cats, bows):
+    columns = defaultdict(list)
+    for group in cath_groups:
+        for domain in cats[group]:
+            if domain not in bows:
+                continue
+            for col, freq in enumerate(bows[domain]):
+                columns[col].append(freq)
+
+    stds = map(np.std, columns.values())
+    bstd = []
+    for group in cath_groups:
+        bmstd = []
+        for domain in cats[group]:
+            if domain not in bows:
+                continue
+            bowstd = []
+            for col, freq in enumerate(bows[domain]):
+                bowstd.append(freq / stds[col])
+            bmstd.append(bowstd)
+        bstd.append(bmstd)
+    return bstd
+
+def stdb_mean(bstd):
+    bmean = []
+    for bows in bstd:
+        mean = []
+        for col in xrange(len(bows[0])):
+            mean.append(np.mean([bow[col] for bow in bows]))
+        bmean.append(mean)
+    return bmean
+
+def delta((b1, b2)):
+    assert len(b1) == len(b2)
+    return max([abs(b1[i] - b2[i]) for i in xrange(len(b1))])
+
+def wdiff(*blocks):
+    return max(map(delta, itertools.combinations(blocks, 2)))
+
+def stdb_shuffle(bstd):
+    sizes = [len(bows) for bows in bstd]
+    allbows = [bow for bows in bstd for bow in bows]
+    random.shuffle(allbows)
+
+    shuffled = []
+    start = 0
+    for size in sizes:
+        shuffled.append(allbows[start:start+size])
+        start += size
+    return shuffled
+
+def std_perms(bstd, count):
+    return [stdb_shuffle(bstd) for _ in xrange(count)]
+
+def pmap(*args, **kargs):
+    if flags.config.cpu > 1:
+        return mp.Pool(processes=flags.config.cpu).map(*args, **kargs)
+    else:
+        return map(*args, **kargs)
+
+def randw(bstd):
+    return wdiff(*stdb_mean(stdb_shuffle(bstd)))
+
+def randws(bstd):
+    return pmap(randw, [bstd for _ in range(1000)])
+
+bcb.set_exp_dir(flags.config.tmp_dir)
+bcb.set_results_dir(flags.config.results_dir)
+bcb.makedirs(bcb.ejoin('vectors'))
+bcb.makedirs(bcb.rjoin(cath_lib_name))
+bcb.make()
+
+flib_paths = flags.config.frag_libs
+flib_names = map(bcb.flib_name, flib_paths)
+
+for flib_path, flib_name in zip(flib_paths, flib_names):
+    flib_dir = bcb.rjoin(cath_lib_name, flib_name)
+    bcb.makedirs(flib_dir)
+
+    domains, cats = domains_from_cath(flags.config.cath_doms_s35)
+    bows = vectors(flib_path, domains)
+
+    for group, subgroups in caths:
+        for subgroup, keys in subgroups:
+            outf = path.join(flib_dir, '%s-%s.tsv' % (group, subgroup))
+            out = open(outf, 'w+')
+            bstd = stdb(keys, cats, bows)
+            bmean = stdb_mean(bstd)
+            # rws = randws(bstd) 
+
+            def rw(_):
+                return wdiff(*stdb_mean(stdb_shuffle(bstd)))
+            rws = pmap(rw, range(1000))
+
+            pairs = list(itertools.combinations(zip(keys, bmean), 2))
+            sig, cutoff = 0, 0.05 / float(len(pairs))
+            for ((lab1, b1), (lab2, b2)) in pairs:
+                bw = wdiff(b1, b2)
+                bigger = len(filter(lambda w: w >= bw, rws))
+                pval = float(bigger) / float(len(rws))
+                print >> out, '%s\t%s\t%f' % (lab1, lab2, pval)
+                if pval < cutoff:
+                    sig += 1
+            print >> out, 'significant\t%d/%d\t(cutoff: %f)' \
+                % (sig, len(pairs), cutoff)
+            out.close()
+
