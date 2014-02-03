@@ -172,6 +172,7 @@ for flib_path, flib_name in zip(flib_paths, flib_names):
         for subgroup, keys in subgroups:
             outf = path.join(flib_dir, '%s-%s.tsv' % (group, subgroup))
             if os.access(outf, os.R_OK):
+                print 'Skipping %s' % outf
                 continue
             out = open(outf, 'w+')
             bstd = stdb(keys, cats, bows)
