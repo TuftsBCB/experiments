@@ -5,6 +5,7 @@ from cStringIO import StringIO
 import csv
 import itertools
 import multiprocessing as mp
+# import multiprocessing.pool as mp 
 import os
 import os.path as path
 import random
@@ -29,7 +30,6 @@ flags.use('frag_libs', (
     None,
 ))
 flags.init()
-pool = mp.Pool(processes=flags.config.cpu)
 
 cath_lib_name = path.basename(flags.config.cath_doms_s35)
 caths = [
@@ -143,9 +143,12 @@ def std_perms(bstd, count):
 
 def pmap(*args, **kargs):
     if flags.config.cpu > 1:
-        return pool.map(*args, **kargs)
+        pool = mp.Pool(processes=flags.config.cpu)
+        r = pool.map(*args, **kargs)
+        pool.close()
     else:
-        return map(*args, **kargs)
+        r = map(*args, **kargs)
+    return r
 
 def randw(bstd):
     return wdiff(*stdb_mean(stdb_shuffle(bstd)))
@@ -183,6 +186,7 @@ for flib_path, flib_name in zip(flib_paths, flib_names):
             def rw(_):
                 return wdiff(*stdb_mean(stdb_shuffle(bstd)))
             rws = pmap(rw, range(1000))
+            # rws = pool.map(randw, [bstd for _ in range(100)]) 
 
             pairs = list(itertools.combinations(zip(keys, bmean), 2))
             sig, cutoff = 0, 0.05 / float(len(pairs))
