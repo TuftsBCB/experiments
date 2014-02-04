@@ -1,0 +1,12 @@
+===== ca-alpha-beta.tsv =====
+significant	19/21	(cutoff: 0.002381)
+===== ca-mainly-alpha.tsv =====
+significant	5/6	(cutoff: 0.008333)
+===== ca-mainly-beta.tsv =====
+significant	21/36	(cutoff: 0.001389)
+===== cat-alpha-beta.tsv =====
+significant	137/231	(cutoff: 0.000216)
+===== cat-mainly-alpha.tsv =====
+significant	44/66	(cutoff: 0.000758)
+===== cat-mainly-beta.tsv =====
+significant	50/78	(cutoff: 0.000641)
