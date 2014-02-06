@@ -1,0 +1,10 @@
+#!/bin/sh
+
+function print_lib_stats {
+  $caab=$(grep "significance" $1/ca-alpha-beta.tsa)
+}
+
+printf "library\tca-alpha-beta\tca-mainly-alpha\tca-mainly-beta\tcat-alpha-beta\tcat-mainly-alpha\tcat-mainly-beta\n"
+for f in structure-atoms_*; do
+  printf "%s\t%s\t
+done

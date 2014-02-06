@@ -6,7 +6,7 @@ import csv
 import itertools
 import multiprocessing as mp
 # import multiprocessing.pool as mp 
-import os
+# import os 
 import os.path as path
 import random
 
@@ -86,6 +86,15 @@ def vectors(flib_path, bowers):
     for row in csv.reader(open(outpath), delimiter='\t'):
         bows[row[0]] = map(float, row[1:])
     return bows
+
+def group_domains(cath_groups, cats):
+    domains = []
+    for group in cath_groups:
+        group_domains = []
+        for domain in cats[group]:
+            group_domains.append(domain)
+        domains.append((group, group_domains))
+    return domains
 
 def stdb(cath_groups, cats, bows):
     columns = defaultdict(list)
@@ -174,30 +183,13 @@ for flib_path, flib_name in zip(flib_paths, flib_names):
 
     for group, subgroups in caths:
         for subgroup, keys in subgroups:
+            grouped = group_domains(keys, cats)
+            grouped_args = ['%s:%s' % (cls, ','.join(ds))
+                            for cls, ds in grouped]
+            vectors_path = bcb.ejoin('vectors',
+                                     '%s-%s.tsv' % (cath_lib_name, flib_name))
             outf = path.join(flib_dir, '%s-%s.tsv' % (group, subgroup))
-            if os.access(outf, os.R_OK):
-                print 'Skipping %s' % outf
-                continue
-            out = open(outf, 'w+')
-            bstd = stdb(keys, cats, bows)
-            bmean = stdb_mean(bstd)
-            # rws = randws(bstd) 
 
-            def rw(_):
-                return wdiff(*stdb_mean(stdb_shuffle(bstd)))
-            rws = pmap(rw, range(1000))
-            # rws = pool.map(randw, [bstd for _ in range(100)]) 
-
-            pairs = list(itertools.combinations(zip(keys, bmean), 2))
-            sig, cutoff = 0, 0.05 / float(len(pairs))
-            for ((lab1, b1), (lab2, b2)) in pairs:
-                bw = wdiff(b1, b2)
-                bigger = len(filter(lambda w: w >= bw, rws))
-                pval = float(bigger) / float(len(rws))
-                print >> out, '%s\t%s\t%f' % (lab1, lab2, pval)
-                if pval < cutoff:
-                    sig += 1
-            print >> out, 'significant\t%d/%d\t(cutoff: %f)' \
-                % (sig, len(pairs), cutoff)
-            out.close()
-
+            cmd = ['cath-significance', '-n', '1000', outf, vectors_path]
+            cmd += grouped_args
+            bcb.cached_cmd([outf], *cmd)
