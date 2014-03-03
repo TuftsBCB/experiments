@@ -168,6 +168,8 @@ func stdb(vectors map[string]bow.Bow, groups []group) [][]bow.Bow {
 				for c, freq := range b.Freqs {
 					columns[c] = append(columns[c], freq)
 				}
+			} else {
+				fmt.Printf("Could not find %s\n", domain)
 			}
 		}
 	}
