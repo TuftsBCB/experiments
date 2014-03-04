@@ -44,7 +44,7 @@ func main() {
 	defer out.Close()
 
 	pf := func(format string, v ...interface{}) {
-		// fmt.Printf(format, v...) 
+		// fmt.Printf(format, v...)
 		fmt.Fprintf(out, format, v...)
 	}
 
@@ -146,7 +146,7 @@ func bmean(row1, row2 []bow.Bow) (bow.Bow, bow.Bow) {
 }
 
 func shuffle_mean_rows(row1, row2 []bow.Bow) (bow.Bow, bow.Bow) {
-	all := make([]bow.Bow, len(row1) + len(row2))
+	all := make([]bow.Bow, len(row1)+len(row2))
 	copy(all, row1)
 	copy(all[len(row1):], row2)
 
