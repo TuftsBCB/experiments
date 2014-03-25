@@ -1,0 +1,156 @@
+#!/usr/bin/env python2
+
+from collections import defaultdict
+import csv
+import os
+import os.path
+
+import numpy as np
+
+import pybcb as bcb
+import pybcb.flags as flags
+
+flags.use_all('cpu', 'tmp-dir', 'results-dir',
+              'ignore-cache', 'no-cache')
+flags.use('boa', (
+    lambda: flags.add('--boa', type=str,
+                      default='/data/bio/best-of-all',
+                      help='A directory containing Kolodny\'s best of all '
+                           'structural alignment results.'),
+    flags.verify_path,
+))
+flags.use('neighbors', (
+    lambda: flags.add('--neighbors', type=str, nargs='+',
+                      default=[1, 5, 10, 50, 100, 500],
+                      help='The number of nearest neighbors to compare.'),
+    None,
+))
+flags.use('unweighted_libs', (
+    lambda: flags.add('--unweighted-libs', type=str, nargs='+',
+                      help='The unweighted fragment libraries to use. Must '
+                           'be in correspondence with --weighted-libs.'),
+    None,
+))
+flags.use('weighted_libs', (
+    lambda: flags.add('--weighted-libs', type=str, nargs='+',
+                      help='The weighted fragment libraries to use. Must '
+                           'be in correspondence with --unweighted-libs.'),
+    None,
+))
+flags.init()
+
+def open_boa(fpath):
+    """
+    Given a directory containing Rachel Kolodny's "best-of-all" results
+    from six different structural aligners, return a dictionary with
+    three keys: `dompath`, `aligners` and `domains`. `aligners` is a
+    dictionary of align names to file paths of aligner matrix files
+    (SAS scores) and `domains` is a list of CATH domains, in order,
+    corresponding to the entries in each aligner matrix file. Finally,
+    `dompath` is the file path to the file containing CATH domains.
+    """
+    aligners = ['ce', 'dali', 'dejavu', 'getter', 'ssap', 'ssm']
+    info = {'aligners': {}, 'domains': [], 'dompath': ''}
+    for aligner in aligners:
+        info['aligners'][aligner] = os.path.join(fpath, 'matrix.%s' % aligner)
+        if not os.access(info['aligners'][aligner], os.R_OK):
+            bcb.eprintln('Could not find alignment distances for aligner "%s" '
+                         'in "%s".' % (aligner, info[aligner]))
+            bcb.exit(1)
+
+    info['dompath'] = os.path.join(fpath, 'cath_domain_labels')
+    try:
+        with open(info['dompath']) as fdomains:
+            info['domains'] = [line.split()[0].strip() for line in fdomains]
+    except IOError:
+        bcb.eprintln('Could not open CATH domain list at "%s".'
+                     % info['dompath'])
+        bcb.exit(1)
+    return info
+
+bcb.set_exp_dir(flags.config.tmp_dir)
+bcb.set_results_dir(flags.config.results_dir)
+bcb.make()
+
+bcb.makedirs(bcb.ejoin('pairdists'))
+
+u_flib_paths = flags.config.unweighted_libs
+w_flib_paths = flags.config.weighted_libs
+boa = open_boa(flags.config.boa)
+
+def pair_dists(flib_path, bowers):
+    fp = bcb.ejoin('pairdists', bcb.flib_name(flib_path))
+    def _():
+        cmd = ['flib', 'pairdist', '-quiet', flib_path] + bowers
+        print >> open(fp, 'w+'), bcb.cmd(*cmd)
+
+    bcb.cached([fp], _)
+    domains, dists = set(), {}
+    for row in csv.reader(open(fp), delimiter='\t'):
+        if len(row) == 0:
+            continue
+        dists[(row[0], row[1])] = float(row[2])
+        dists[(row[1], row[0])] = float(row[2])
+        domains.add(row[0])
+        domains.add(row[1])
+    return domains, dists
+
+def domain_dists(d1, domains, dists):
+    ds = []
+    for d2 in domains:
+        if d1 == d2:
+            continue
+        ds.append((dists[(d1, d2)], d2))
+    return sorted(ds)
+
+# Make the BOW database for the given fragment libraries containing all of the
+# CATH entries from the best-of-all alignment test.
+for i in xrange(len(u_flib_paths)):
+    upath, uname = u_flib_paths[i], bcb.flib_name(u_flib_paths[i])
+    wpath, wname = w_flib_paths[i], bcb.flib_name(w_flib_paths[i])
+    results = bcb.rjoin('%s.tsv' % uname)
+    def _():
+        domains, udists = pair_dists(upath, boa['domains'])
+        _, wdists = pair_dists(wpath, boa['domains'])
+
+        exacts, inters = defaultdict(int), defaultdict(list)
+        jaccards = defaultdict(list)
+        eighty, sixty = defaultdict(int), defaultdict(int)
+
+        f = open(results, 'w+')
+        print >> f, 'neighbors\texactly equal\t80% equal\t60% equal' \
+                    '\tintersection\tjaccard'
+        for d in domains:
+            uds = domain_dists(d, domains, udists)
+            wds = domain_dists(d, domains, wdists)
+            for n in flags.config.neighbors:
+                if n > len(uds):
+                    continue
+                uns, wns = [x[1] for x in uds[0:n]], [x[1] for x in wds[0:n]]
+                suns, swns = set(uns), set(wns)
+
+                inter = len(suns.intersection(swns))
+                jaccard = float(inter) / float(len(suns.union(swns)))
+
+                if uns == wns:
+                    exacts[n] += 1
+                inters[n].append(inter)
+                jaccards[n].append(jaccard)
+                if jaccard >= 0.80:
+                    eighty[n] += 1
+                if jaccard >= 0.60:
+                    sixty[n] += 1
+
+        rat = lambda n: 100 * (float(n) / float(len(domains)))
+        for n in flags.config.neighbors:
+            inter_mean = np.mean(inters[n] or [0])
+            inter_std = np.std(inters[n] or [0])
+            jaccard_mean = np.mean(jaccards[n] or [0])
+            jaccard_std = np.std(jaccards[n] or [0])
+            print >> f, '%d\t%0.2f%%\t%0.2f%%\t%0.2f%%' \
+                        '\t%0.2f +/- %0.2f\t%0.2f +/- %0.2f' \
+                % (n, rat(exacts[n]), rat(eighty[n]), rat(sixty[n]),
+                   inter_mean, inter_std,
+                   jaccard_mean, jaccard_std)
+    bcb.cached([results], _)
+
